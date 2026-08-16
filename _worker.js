@@ -16,8 +16,11 @@ const SYSTEM_DNS_ONLY_DOMAINS = [
     "grok.com",
     "twimg.com"
 ];
-// const TWITTER_DOMAINS = ["twimg.com", "twitter.com", "x.com", "t.co"]; //您可以添加某域名强制解析到CF，填写 x.com 时包含 *.x.com，适用于仅ipv4访问或多CDN负载均衡的站点
-// const DEFAULT_TWITTER_IP = "104.18.11.118";
+const TWITTER_DOMAINS = [
+    "twimg.com", "twitter.com", "x.com", "t.co",
+    "pixiv.net", "pximg.net"
+]; //您可以添加某域名强制解析到CF，填写 x.com 时包含 *.x.com，适用于仅ipv4访问或多CDN负载均衡的站点
+const DEFAULT_TWITTER_IP = "104.18.11.118";
 const META_ECH_CONFIG = "AEj+DQBEAQAgACAdd+scUi0IYFsXnUIU7ko2Nd9+F8M26pAGZVpz/KrWPgAEAAEAAWQVZWNoLXB1YmxpYy5hdG1ldGEuY29tAAA=";
 
 // --- CIDR 数据区 ---
@@ -129,7 +132,7 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
             }
         }
 
-        /* const isTwitter = TWITTER_DOMAINS.some(d => qName === d || qName.endsWith("." + d));
+        const isTwitter = TWITTER_DOMAINS.some(d => qName === d || qName.endsWith("." + d));
         if (isTwitter) {
             if (qType === 28) return dnsResponse(createMultiAnsResponse(id, qName, 28, [], 3600));
             
@@ -151,7 +154,7 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
                 return forwardQuery(rawBuffer, env);
             }
             return forwardQuery(rawBuffer, env);
-        } */
+        }
 
         let ownerData = await getOwnerFromCache(qName);
         let probedIps = null;
