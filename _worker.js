@@ -191,7 +191,7 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
                 }
 
                 if (!dataFromProbe) {
-                    const res = await forwardQuery(rawBuffer, env);
+                    const res = await forwardPublicQuery(rawBuffer);
                     const buf = await res.arrayBuffer();
                     const ips = extractIpsFromPacket(buf);
                     
@@ -215,7 +215,7 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
             }
             return forwardQuery(rawBuffer, env);
         }
-        if (ownerData === 'CF') return forwardPublicQuery(rawBuffer);
+        if (ownerData === 'CF' || ownerData === 'META') return forwardPublicQuery(rawBuffer);
         return forwardQuery(rawBuffer, env);
     } catch (err) {
         throw new Error(`DNS Logic Error: ${err.message}`);
