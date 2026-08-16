@@ -6,6 +6,7 @@ const UPSTREAM_DNS = 'https://dns.google/dns-query';
 const UPSTREAM_JSON = 'https://dns.google/resolve';
 const API_PATH = '/doh-ech-test'; //您可以自定义path
 const TEST_PATH = '/doh-test'; //您可以自定义path
+const PRIVATE_DNS_ADDRESS = '192.168.1.1:53';
 
 // --- 静态配置 ---
 const TWITTER_DOMAINS = ["twimg.com", "twitter.com", "x.com", "t.co"]; //您可以添加某域名强制解析到CF，填写 x.com 时包含 *.x.com，适用于仅ipv4访问或多CDN负载均衡的站点
@@ -53,14 +54,14 @@ async function handleRequest(request, env, ctx) {
 
         if (request.method === 'POST') {
             const rawBuffer = await request.arrayBuffer();
-            return await handleDnsQuery(rawBuffer, config, ctx);
+            return await handleDnsQuery(rawBuffer, config, env, ctx);
         }
 
         if (request.method === 'GET' && url.searchParams.get('dns')) {
             const rawDnsParam = url.searchParams.get('dns');
             const safeBase64 = rawDnsParam.replace(/ /g, '+').replace(/-/g, '+').replace(/_/g, '/');
             const dnsQuery = Uint8Array.from(atob(safeBase64), c => c.charCodeAt(0));
-            return await handleDnsQuery(dnsQuery.buffer, config, ctx);
+            return await handleDnsQuery(dnsQuery.buffer, config, env, ctx);
         }
         return new Response('OK', { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
     }
@@ -68,7 +69,7 @@ async function handleRequest(request, env, ctx) {
     if (url.pathname === TEST_PATH) {
         if (request.method === 'POST') {
             const rawBuffer = await request.arrayBuffer();
-            const res = await forwardQuery(rawBuffer);
+            const res = await forwardQuery(rawBuffer, env);
             return dnsResponse(await res.arrayBuffer());
         }
 
@@ -76,7 +77,7 @@ async function handleRequest(request, env, ctx) {
             const rawDnsParam = url.searchParams.get('dns');
             const safeBase64 = rawDnsParam.replace(/ /g, '+').replace(/-/g, '+').replace(/_/g, '/');
             const dnsQuery = Uint8Array.from(atob(safeBase64), c => c.charCodeAt(0));
-            const res = await forwardQuery(dnsQuery.buffer);
+            const res = await forwardQuery(dnsQuery.buffer, env);
             return dnsResponse(await res.arrayBuffer());
         }
         return new Response('OK', { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
@@ -85,10 +86,10 @@ async function handleRequest(request, env, ctx) {
     return new Response(null, { status: 404 });
 }
 
-async function handleDnsQuery(rawBuffer, config, ctx) {
+async function handleDnsQuery(rawBuffer, config, env, ctx) {
     try {
         const query = parseDnsPacket(rawBuffer);
-        if (!query || query.questions.length === 0) return forwardQuery(rawBuffer);
+        if (!query || query.questions.length === 0) return forwardQuery(rawBuffer, env);
 
         const { id, questions } = query;
         const qType = questions[0].type;
@@ -136,9 +137,9 @@ async function handleDnsQuery(rawBuffer, config, ctx) {
                 if (replaceIps && replaceIps.length > 0) {
                     return dnsResponse(createMultiAnsResponse(id, qName, 1, replaceIps));
                 }
-                return forwardQuery(rawBuffer);
+                return forwardQuery(rawBuffer, env);
             }
-            return forwardQuery(rawBuffer);
+            return forwardQuery(rawBuffer, env);
         }
 
         let ownerData = await getOwnerFromCache(qName);
@@ -165,7 +166,7 @@ async function handleDnsQuery(rawBuffer, config, ctx) {
                 if (echRdata) return dnsResponse(createMultiAnsResponse(id, qName, 65, [echRdata], 300));
                 return dnsResponse(createMultiAnsResponse(id, qName, 65, [], 60));
             }
-            return forwardQuery(rawBuffer);
+            return forwardQuery(rawBuffer, env);
         }
 
         if (qType === 1 || qType === 28) {
@@ -179,7 +180,7 @@ async function handleDnsQuery(rawBuffer, config, ctx) {
                 }
 
                 if (!dataFromProbe) {
-                    const res = await forwardQuery(rawBuffer);
+                    const res = await forwardQuery(rawBuffer, env);
                     const buf = await res.arrayBuffer();
                     const ips = extractIpsFromPacket(buf);
                     
@@ -199,10 +200,12 @@ async function handleDnsQuery(rawBuffer, config, ctx) {
 
                 if (!replaceIps && config.cfDomain) replaceIps = await fetchReplacementIps(config.cfDomain, qType, ctx);
                 if (replaceIps && replaceIps.length > 0) return dnsResponse(createMultiAnsResponse(id, qName, qType, replaceIps));
+                return forwardPublicQuery(rawBuffer);
             }
-            return forwardQuery(rawBuffer);
+            return forwardQuery(rawBuffer, env);
         }
-        return forwardQuery(rawBuffer);
+        if (ownerData === 'CF') return forwardPublicQuery(rawBuffer);
+        return forwardQuery(rawBuffer, env);
     } catch (err) {
         throw new Error(`DNS Logic Error: ${err.message}`);
     }
@@ -384,8 +387,82 @@ function dnsResponse(buffer) {
     return new Response(buffer, { headers: { 'Content-Type': 'application/dns-message', 'Access-Control-Allow-Origin': '*' } });
 }
 
-function forwardQuery(body) {
+function forwardPublicQuery(body) {
     return fetch(UPSTREAM_DNS, { method: 'POST', headers: { 'Content-Type': 'application/dns-message', 'Accept': 'application/dns-message' }, body });
+}
+
+async function forwardQuery(body, env) {
+    if (!env.PRIVATE_NETWORK || typeof env.PRIVATE_NETWORK.connect !== 'function') {
+        throw new Error('Missing Workers VPC Network binding: PRIVATE_NETWORK');
+    }
+
+    const query = body instanceof Uint8Array ? body : new Uint8Array(body);
+    if (query.byteLength < 12 || query.byteLength > 65535) {
+        throw new Error('Invalid DNS query size');
+    }
+
+    const socket = await env.PRIVATE_NETWORK.connect(PRIVATE_DNS_ADDRESS);
+    let timer;
+    try {
+        await socket.opened;
+        const frame = new Uint8Array(query.byteLength + 2);
+        const frameView = new DataView(frame.buffer);
+        frameView.setUint16(0, query.byteLength);
+        frame.set(query, 2);
+
+        const writer = socket.writable.getWriter();
+        try {
+            await writer.write(frame);
+        } finally {
+            writer.releaseLock();
+        }
+
+        const response = await Promise.race([
+            readDnsTcpResponse(socket.readable),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('Private DNS query timed out')), 5000);
+            })
+        ]);
+        return dnsResponse(response);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        await socket.close().catch(() => {});
+    }
+}
+
+async function readDnsTcpResponse(readable) {
+    const reader = readable.getReader();
+    const chunks = [];
+    let total = 0;
+    let messageLength = null;
+    try {
+        while (messageLength === null || total < messageLength + 2) {
+            const { value, done } = await reader.read();
+            if (done) throw new Error('Private DNS connection closed before full response');
+            if (!(value instanceof Uint8Array) || value.byteLength === 0) continue;
+            chunks.push(value);
+            total += value.byteLength;
+            if (messageLength === null && total >= 2) {
+                const prefix = concatChunks(chunks, total);
+                messageLength = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getUint16(0);
+                if (messageLength < 12) throw new Error('Invalid private DNS response size');
+            }
+        }
+        const framed = concatChunks(chunks, total);
+        return framed.slice(2, messageLength + 2).buffer;
+    } finally {
+        reader.releaseLock();
+    }
+}
+
+function concatChunks(chunks, total) {
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return result;
 }
 
 function createMultiAnsResponse(id, qn, qt, rds, ttl = 3600) {
