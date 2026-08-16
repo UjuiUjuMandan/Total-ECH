@@ -50,8 +50,10 @@ export default {
 
 async function handleRequest(request, env, ctx) {
     const url = new URL(request.url);
+    const apiPath = env.API_PATH || API_PATH;
+    const testPath = env.TEST_PATH || TEST_PATH;
 
-    if (url.pathname === API_PATH) {
+    if (url.pathname === apiPath) {
         const config = {
             ip4: url.searchParams.get('ip4'),
             ip6: url.searchParams.get('ip6'),
@@ -73,7 +75,7 @@ async function handleRequest(request, env, ctx) {
         return new Response('OK', { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
     }
 
-    if (url.pathname === TEST_PATH) {
+    if (url.pathname === testPath) {
         if (request.method === 'POST') {
             const rawBuffer = await request.arrayBuffer();
             const res = await forwardQuery(rawBuffer, env);
