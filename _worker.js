@@ -180,6 +180,7 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
                 if (echRdata) return dnsResponse(createMultiAnsResponse(id, qName, 65, [echRdata], 300));
                 return dnsResponse(createMultiAnsResponse(id, qName, 65, [], 60));
             }
+            if (ownerData === 'ECH') return forwardPublicQuery(rawBuffer);
             return forwardQuery(rawBuffer, env);
         }
 
@@ -216,9 +217,10 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
                 if (replaceIps && replaceIps.length > 0) return dnsResponse(createMultiAnsResponse(id, qName, qType, replaceIps));
                 return forwardPublicQuery(rawBuffer);
             }
+            if (ownerData === 'ECH') return forwardPublicQuery(rawBuffer);
             return forwardQuery(rawBuffer, env);
         }
-        if (ownerData === 'CF' || ownerData === 'META') return forwardPublicQuery(rawBuffer);
+        if (ownerData === 'CF' || ownerData === 'META' || ownerData === 'ECH') return forwardPublicQuery(rawBuffer);
         return forwardQuery(rawBuffer, env);
     } catch (err) {
         throw new Error(`DNS Logic Error: ${err.message}`);
@@ -263,9 +265,13 @@ function setOwnerCache(name, owner, ctx) {
 
 async function activeProbeOwner(domain, ctx) {
     try {
-        const res = await fetch(`${UPSTREAM_JSON}?name=${domain}&type=1`, { headers: { 'Accept': 'application/dns-json' } });
-        if (res.ok) {
-            const data = await res.json();
+        const [addressResult, httpsResult] = await Promise.allSettled([
+            fetch(`${UPSTREAM_JSON}?name=${domain}&type=1`, { headers: { 'Accept': 'application/dns-json' } }),
+            fetch(`${UPSTREAM_JSON}?name=${domain}&type=65`, { headers: { 'Accept': 'application/dns-json' } })
+        ]);
+
+        if (addressResult.status === 'fulfilled' && addressResult.value.ok) {
+            const data = await addressResult.value.json();
             if (data.Answer) {
                 const ips = data.Answer.filter(a => a.type === 1).map(a => a.data);
                 let detectedOwner = null;
@@ -277,6 +283,17 @@ async function activeProbeOwner(domain, ctx) {
                     setOwnerCache(domain, detectedOwner, ctx);
                     return { owner: detectedOwner, ips: ips };
                 }
+            }
+        }
+
+        if (httpsResult.status === 'fulfilled' && httpsResult.value.ok) {
+            const data = await httpsResult.value.json();
+            const hasEch = data.Answer && data.Answer.some(a =>
+                a.type === 65 && /(?:^|\s)ech=/.test(a.data)
+            );
+            if (hasEch) {
+                setOwnerCache(domain, 'ECH', ctx);
+                return { owner: 'ECH', ips: [] };
             }
         }
     } catch (e) {}
