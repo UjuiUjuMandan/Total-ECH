@@ -254,7 +254,7 @@ async function handleDnsQuery(rawBuffer, config, env, ctx, usePrivateDns) {
 // 工具函数
 // ============================================================================
 function usesSystemDNSOnly(name) {
-    return /^scontent-[^.]+\.xx\.fbcdn\.net$/.test(name) ||
+    return /^(scontent|external)-[^.]+\.xx\.fbcdn\.net$/.test(name) ||
         SYSTEM_DNS_ONLY_DOMAINS.some(domain => name === domain || name.endsWith("." + domain));
 }
 
