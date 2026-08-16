@@ -2,8 +2,8 @@
  * Total-ECH: 为 CDN 全面开启 ECH 的 DoH 服务
  */
 
-const UPSTREAM_DNS = 'https://dns.google/dns-query';
-const UPSTREAM_JSON = 'https://dns.google/resolve';
+const UPSTREAM_DNS = 'https://cloudflare-dns.com/dns-query';
+const UPSTREAM_JSON = 'https://cloudflare-dns.com/dns-query';
 const API_PATH = '/doh-ech-test'; //您可以自定义path
 const TEST_PATH = '/doh-test'; //您可以自定义path
 const PRIVATE_DNS_ADDRESS = '192.168.1.1:53';
