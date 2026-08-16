@@ -22,6 +22,23 @@ const TWITTER_DOMAINS = [
 ]; //您可以添加某域名强制解析到CF，填写 x.com 时包含 *.x.com，适用于仅ipv4访问或多CDN负载均衡的站点
 const DEFAULT_TWITTER_IP = "104.18.11.118";
 const META_ECH_CONFIG = "AEj+DQBEAQAgACAdd+scUi0IYFsXnUIU7ko2Nd9+F8M26pAGZVpz/KrWPgAEAAEAAWQVZWNoLXB1YmxpYy5hdG1ldGEuY29tAAA=";
+const FACEBOOK_IP_POOL = {
+    ipv4: ["57.144.144.1", "157.240.241.35"],
+    ipv6: ["2a03:2880:f112:182:face:b00c:0:25de", "2a03:2880:f342:8d:face:b00c:0:2"]
+};
+const FACEBOOK_CDN_IP_POOL = {
+    ipv4: [],
+    ipv6: [
+        "2a03:2880:f342:80:face:b00c:0:3",
+        "2a03:2880:f012:10c:face:b00c:0:3",
+        "2a03:2880:f112:185:face:b00c:0:14c9"
+    ]
+};
+const FACEBOOK_CDN_DOMAINS = new Set([
+    "static.xx.fbcdn.net",
+    "scontent.xx.fbcdn.net",
+    "z-m-static.xx.fbcdn.net"
+]);
 
 // --- CIDR 数据区 ---
 const RAW_META_CIDRS = [
@@ -108,6 +125,11 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
         const qName = questions[0].name.toLowerCase().replace(/\.$/, "");
 
         if (usesSystemDNSOnly(qName)) return forwardQuery(rawBuffer, env);
+
+        const facebookPool = getFacebookIpPool(qName);
+        if (facebookPool && (qType === 1 || qType === 28 || qType === 65)) {
+            return dnsResponse(createFacebookPoolResponse(id, qName, qType, facebookPool));
+        }
         
         if (qName === "cf.ech" || qName === "fb.ech") {
             if (qType === 65) {
@@ -231,7 +253,32 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
 // 工具函数
 // ============================================================================
 function usesSystemDNSOnly(name) {
-    return SYSTEM_DNS_ONLY_DOMAINS.some(domain => name === domain || name.endsWith("." + domain));
+    return /^scontent-[^.]+\.xx\.fbcdn\.net$/.test(name) ||
+        SYSTEM_DNS_ONLY_DOMAINS.some(domain => name === domain || name.endsWith("." + domain));
+}
+
+function getFacebookIpPool(name) {
+    if (FACEBOOK_CDN_DOMAINS.has(name)) return FACEBOOK_CDN_IP_POOL;
+    if (name === "facebook.com" || name.endsWith(".facebook.com")) return FACEBOOK_IP_POOL;
+    return null;
+}
+
+function createFacebookPoolResponse(id, name, type, pool) {
+    if (type === 1) {
+        return createMultiAnsResponse(id, name, type, pool.ipv4.map(ipToBytes), 300);
+    }
+    if (type === 28) {
+        return createMultiAnsResponse(id, name, type, pool.ipv6.map(ipv6ToBytes), 300);
+    }
+
+    const params = [
+        { key: 'alpn', val: 'h2,h3' },
+        { key: 'ech', val: META_ECH_CONFIG }
+    ];
+    if (pool.ipv4.length > 0) params.push({ key: 'ipv4hint', val: pool.ipv4.join(',') });
+    if (pool.ipv6.length > 0) params.push({ key: 'ipv6hint', val: pool.ipv6.join(',') });
+    const rdata = packHttpsParams(1, ".", params);
+    return createMultiAnsResponse(id, name, 65, [rdata], 300);
 }
 
 async function getOwnerFromCache(name) {
@@ -531,12 +578,18 @@ function packHttpsParams(priority, target, params) {
 }
 
 function encodeSvcParam(key, value) {
-    const ids = { 'alpn': 1, 'ech': 5 }; const id = ids[key]; if (!id) return null;
+    const ids = { 'alpn': 1, 'ipv4hint': 4, 'ech': 5, 'ipv6hint': 6 }; const id = ids[key]; if (!id) return null;
     let valBuf;
     if (key === 'alpn') {
         const parts = value.split(','); valBuf = new Uint8Array(parts.reduce((a, b) => a + b.length + 1, 0));
         let o = 0;
         for (const p of parts) { valBuf[o++] = p.length; for (let i = 0; i < p.length; i++) valBuf[o++] = p.charCodeAt(i); }
+    } else if (key === 'ipv4hint') {
+        const ips = value.split(',').map(ipToBytes);
+        valBuf = concatChunks(ips, ips.length * 4);
+    } else if (key === 'ipv6hint') {
+        const ips = value.split(',').map(ipv6ToBytes);
+        valBuf = concatChunks(ips, ips.length * 16);
     } else {
         const s = atob(value.replace(/-/g, '+').replace(/_/g, '/')); valBuf = new Uint8Array(s.length);
         for (let i = 0; i < s.length; i++) valBuf[i] = s.charCodeAt(i);
