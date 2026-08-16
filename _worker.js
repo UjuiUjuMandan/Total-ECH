@@ -72,6 +72,7 @@ async function handleRequest(request, env, ctx) {
     const url = new URL(request.url);
     const apiPath = env.API_PATH || API_PATH;
     const testPath = env.TEST_PATH || TEST_PATH;
+    const usePrivateDns = shouldUsePrivateDns(request);
 
     if (url.pathname === apiPath) {
         const config = {
@@ -83,14 +84,14 @@ async function handleRequest(request, env, ctx) {
 
         if (request.method === 'POST') {
             const rawBuffer = await request.arrayBuffer();
-            return await handleDnsQuery(rawBuffer, config, env, ctx);
+            return await handleDnsQuery(rawBuffer, config, env, ctx, usePrivateDns);
         }
 
         if (request.method === 'GET' && url.searchParams.get('dns')) {
             const rawDnsParam = url.searchParams.get('dns');
             const safeBase64 = rawDnsParam.replace(/ /g, '+').replace(/-/g, '+').replace(/_/g, '/');
             const dnsQuery = Uint8Array.from(atob(safeBase64), c => c.charCodeAt(0));
-            return await handleDnsQuery(dnsQuery.buffer, config, env, ctx);
+            return await handleDnsQuery(dnsQuery.buffer, config, env, ctx, usePrivateDns);
         }
         return new Response('OK', { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
     }
@@ -98,7 +99,7 @@ async function handleRequest(request, env, ctx) {
     if (url.pathname === testPath) {
         if (request.method === 'POST') {
             const rawBuffer = await request.arrayBuffer();
-            const res = await forwardQuery(rawBuffer, env);
+            const res = await forwardQuery(rawBuffer, env, usePrivateDns);
             return dnsResponse(await res.arrayBuffer());
         }
 
@@ -106,7 +107,7 @@ async function handleRequest(request, env, ctx) {
             const rawDnsParam = url.searchParams.get('dns');
             const safeBase64 = rawDnsParam.replace(/ /g, '+').replace(/-/g, '+').replace(/_/g, '/');
             const dnsQuery = Uint8Array.from(atob(safeBase64), c => c.charCodeAt(0));
-            const res = await forwardQuery(dnsQuery.buffer, env);
+            const res = await forwardQuery(dnsQuery.buffer, env, usePrivateDns);
             return dnsResponse(await res.arrayBuffer());
         }
         return new Response('OK', { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
@@ -115,16 +116,16 @@ async function handleRequest(request, env, ctx) {
     return new Response(null, { status: 404 });
 }
 
-async function handleDnsQuery(rawBuffer, config, env, ctx) {
+async function handleDnsQuery(rawBuffer, config, env, ctx, usePrivateDns) {
     try {
         const query = parseDnsPacket(rawBuffer);
-        if (!query || query.questions.length === 0) return forwardQuery(rawBuffer, env);
+        if (!query || query.questions.length === 0) return forwardQuery(rawBuffer, env, usePrivateDns);
 
         const { id, questions } = query;
         const qType = questions[0].type;
         const qName = questions[0].name.toLowerCase().replace(/\.$/, "");
 
-        if (usesSystemDNSOnly(qName)) return forwardQuery(rawBuffer, env);
+        if (usesSystemDNSOnly(qName)) return forwardQuery(rawBuffer, env, usePrivateDns);
 
         const facebookPool = getFacebookIpPool(qName);
         if (facebookPool && (qType === 1 || qType === 28 || qType === 65)) {
@@ -173,9 +174,9 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
                 if (replaceIps && replaceIps.length > 0) {
                     return dnsResponse(createMultiAnsResponse(id, qName, 1, replaceIps));
                 }
-                return forwardQuery(rawBuffer, env);
+                return forwardQuery(rawBuffer, env, usePrivateDns);
             }
-            return forwardQuery(rawBuffer, env);
+            return forwardQuery(rawBuffer, env, usePrivateDns);
         }
 
         let ownerData = await getOwnerFromCache(qName);
@@ -203,7 +204,7 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
                 return dnsResponse(createMultiAnsResponse(id, qName, 65, [], 60));
             }
             if (ownerData === 'ECH') return forwardPublicQuery(rawBuffer);
-            return forwardQuery(rawBuffer, env);
+            return forwardQuery(rawBuffer, env, usePrivateDns);
         }
 
         if (qType === 1 || qType === 28) {
@@ -240,10 +241,10 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
                 return forwardPublicQuery(rawBuffer);
             }
             if (ownerData === 'ECH') return forwardPublicQuery(rawBuffer);
-            return forwardQuery(rawBuffer, env);
+            return forwardQuery(rawBuffer, env, usePrivateDns);
         }
         if (ownerData === 'CF' || ownerData === 'META' || ownerData === 'ECH') return forwardPublicQuery(rawBuffer);
-        return forwardQuery(rawBuffer, env);
+        return forwardQuery(rawBuffer, env, usePrivateDns);
     } catch (err) {
         throw new Error(`DNS Logic Error: ${err.message}`);
     }
@@ -255,6 +256,16 @@ async function handleDnsQuery(rawBuffer, config, env, ctx) {
 function usesSystemDNSOnly(name) {
     return /^scontent-[^.]+\.xx\.fbcdn\.net$/.test(name) ||
         SYSTEM_DNS_ONLY_DOMAINS.some(domain => name === domain || name.endsWith("." + domain));
+}
+
+function getRequestCountry(request) {
+    return String(request.cf?.country || request.headers.get('CF-IPCountry') || '').toUpperCase();
+}
+
+function shouldUsePrivateDns(request) {
+    if (getRequestCountry(request) !== 'CN') return false;
+    const requestIp = request.headers.get('CF-Connecting-IP')?.trim();
+    return !requestIp || !isIpInCompiledCidrs(requestIp, COMPILED_CF);
 }
 
 function getFacebookIpPool(name) {
@@ -473,7 +484,9 @@ function forwardPublicQuery(body) {
     return fetch(UPSTREAM_DNS, { method: 'POST', headers: { 'Content-Type': 'application/dns-message', 'Accept': 'application/dns-message' }, body });
 }
 
-async function forwardQuery(body, env) {
+async function forwardQuery(body, env, usePrivateDns) {
+    if (!usePrivateDns) return forwardPublicQuery(body);
+
     if (!env.PRIVATE_NETWORK || typeof env.PRIVATE_NETWORK.connect !== 'function') {
         throw new Error('Missing Workers VPC Network binding: PRIVATE_NETWORK');
     }
